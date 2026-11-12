@@ -1,0 +1,17 @@
+{
+    "id": "dankMixer",
+    "name": "Dank Mixer",
+    "description": "Per-app volume and output routing, with any app playing on several outputs at once.",
+    "version": "0.1.0-alpha",
+    "author": "etidona",
+    "icon": "tune",
+    "type": "composite",
+    "capabilities": ["daemon", "dankbar-widget"],
+    "components": {
+        "daemon": "./MixerDaemon.qml",
+        "widget": "./MixerWidget.qml"
+    },
+    "requires_dms": ">=2.1.0",
+    "requires": ["pw-loopback", "pw-metadata", "pw-link", "pw-cli", "systemd-run", "systemctl", "sh"],
+    "permissions": ["process"]
+}
