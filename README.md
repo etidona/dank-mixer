@@ -12,8 +12,10 @@ with any app playing on several outputs at once.
 
 ## Features
 
-- **One card per app** playing or recording audio, with its volume.
-- **Choose the output** of each app, or let it follow the system default.
+- **One card per stream** playing or recording audio, with its volume: two
+  browser tabs get two cards.
+- **Choose the output** of each stream, or let it follow the system default.
+  New streams of the app go to the last device chosen.
 - **Several outputs at once:** send an app to speakers and headphones together,
   each output with its own volume, relative to the app's volume.
 - **Latency sync** across outputs: faster outputs wait for the slowest one, and
@@ -26,6 +28,9 @@ with any app playing on several outputs at once.
   mid-video.
 - **Unplugged devices** are skipped, not replaced: an output resumes when its
   device comes back.
+- **Works with [Web Popups](https://github.com/etidona/dms-web-popups):** each web
+  app gets its own card with its name and icon, and both plugins agree on
+  where it plays.
 - Folding cards, an expanded view, and a pin to keep the popout open while you
   work elsewhere.
 
@@ -61,12 +66,16 @@ For latency sync, the plugin reads each device's latency from PipeWire, delays
 the faster outputs with `pw-loopback -d`, and declares the slowest latency on
 the bus (`ProcessLatency`), which the app sees as its output latency.
 
+How and why it is built this way, in detail: [docs/design.md](docs/design.md).
+
 ## Known limitations
 
 - Tested on a single machine only (see the warning above).
 - Changing an output's delay restarts that output, so you hear a short gap.
 - PipeWire's latency figures for Bluetooth are estimates; use the per-device
   sync delay to fine-tune by ear.
+- An app on several outputs is a single card: all its streams (every browser
+  tab) play through the same outputs.
 - Routing to several outputs is for playback only; recording apps get a
   single input.
 

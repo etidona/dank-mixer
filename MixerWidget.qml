@@ -159,7 +159,7 @@ PluginComponent {
                     Repeater {
                         model: ScriptModel {
                             values: root.mixer?.apps ?? []
-                            objectProp: "key"
+                            objectProp: "id"
                         }
                         delegate: AppCard {
                             width: list.width
@@ -260,11 +260,12 @@ PluginComponent {
         property string text
         property string iconName
         property string iconSource: ""
+        property string subtitle: ""
         readonly property bool locked: root.mixer?.expanded ?? false
         readonly property bool open: locked || !(root.mixer?.isCollapsed(key) ?? false)
 
         width: parent.width
-        height: Theme.iconSizeSmall + Theme.spacingS
+        height: Math.max(Theme.iconSizeSmall, texts.implicitHeight) + Theme.spacingS
 
         Row {
             anchors.verticalCenter: parent.verticalCenter
@@ -280,12 +281,32 @@ PluginComponent {
                 name: header.iconName
                 size: Theme.iconSizeSmall
             }
-            StyledText {
+            Column {
+                id: texts
+                anchors.verticalCenter: parent.verticalCenter
                 width: header.width - Theme.iconSizeSmall * 2 - Theme.spacingS * 2
-                text: header.text
-                font.pixelSize: Theme.fontSizeSmall
-                font.weight: Font.Medium
-                elide: Text.ElideRight
+
+                StyledText {
+                    width: parent.width
+                    text: header.text
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.weight: Font.Medium
+                    elide: Text.ElideRight
+                    // StyledText wraps by default; names and titles stay on one line.
+                    wrapMode: Text.NoWrap
+                    maximumLineCount: 1
+                }
+                StyledText {
+                    visible: header.subtitle !== "" && header.subtitle !== header.text
+                    width: parent.width
+                    text: header.subtitle
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.surfaceVariantText
+                    elide: Text.ElideRight
+                    // StyledText wraps by default; names and titles stay on one line.
+                    wrapMode: Text.NoWrap
+                    maximumLineCount: 1
+                }
             }
         }
         DIcon {
@@ -317,8 +338,9 @@ PluginComponent {
             id: header
             key: card.app.key
             text: card.app.name
+            subtitle: card.app.title
             iconSource: card.app.icon
-            iconName: card.app.playback ? "music_note" : "mic"
+            iconName: card.app.iconName || (card.app.playback ? "music_note" : "mic")
         }
 
         Item {
@@ -359,6 +381,8 @@ PluginComponent {
                 required property var modelData
                 required property int index
                 readonly property real inset: card.app.split ? Theme.spacingXS : 0
+                // A saved device that is not connected stays listed under its own name.
+                readonly property bool missing: modelData.device !== "" && !card.devices.some(n => n.name === modelData.device)
 
                 x: card.app.split ? Theme.spacingM : 0
                 width: (parent?.width ?? 0) - x
@@ -393,8 +417,8 @@ PluginComponent {
                         DDropdown {
                             compactMode: true
                             dropdownWidth: parent.width - (button.visible ? button.width + Theme.spacingS : 0)
-                            options: ["System default"].concat(card.devices.map(n => AudioService.displayName(n)))
-                            optionValues: [""].concat(card.devices.map(n => n.name))
+                            options: ["System default"].concat(card.devices.map(n => AudioService.displayName(n)), output.missing ? [(output.modelData.label || output.modelData.device) + " (not connected)"] : [])
+                            optionValues: [""].concat(card.devices.map(n => n.name), output.missing ? [output.modelData.device] : [])
                             currentValue: output.modelData.device
                             // Picking an entry replaces the binding; restore it to follow the real device.
                             onValueChanged: value => {

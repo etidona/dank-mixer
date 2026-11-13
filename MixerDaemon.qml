@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import Quickshell.Services.Pipewire
 import qs.Common
 import qs.Services
@@ -20,7 +21,8 @@ Scope {
     // Every PipeWire node and systemd unit this plugin creates starts with it.
     readonly property string prefix: "dankmixer"
 
-    // App key -> [{ id, sink }] for apps sent to two or more outputs.
+    // App key -> [{ id, sink, label }] for apps sent to two or more outputs;
+    // label is the device's description, to find it again under a new name.
     property var splits: ({})
     // Card key ("devices" or an app key) -> folded or not, once the user chose.
     property var collapsed: ({})
@@ -30,14 +32,23 @@ Scope {
     property bool expanded: false
     // Saved data, running units and latencies are known; actions wait for it.
     property bool loaded: false
-    // App key -> deadline (ms) for apps whose streams are moving off their bus.
+    // App key -> { until (ms), handBack } for apps whose streams are moving off
+    // their bus; handBack tells Web Popups the device they end up on.
     property var leaving: ({})
     // Device name -> latency in ns as PipeWire reports it.
     property var latencies: ({})
+    // App key -> { sink, label } for apps sent to one chosen device (saved).
+    // Browsers open a new stream for every video; new streams go there too.
+    // Web Popups apps are not kept here: Web Popups remembers their output.
+    property var chosen: ({})
     // Device name -> extra latency in ms set by the user, for delay PipeWire doesn't know about (saved).
     property var offsets: ({})
     // Systemd units of the loopbacks running now.
     property var running: []
+    // Web apps just split: Web Popups is told to let go once their streams are
+    // on the bus, not before, or WirePlumber would send them to the default
+    // device in between.
+    property var handOff: ({})
     // App key -> { name, icon }; desktop entry lookups are slow, apps change often.
     property var labels: ({})
 
@@ -47,8 +58,10 @@ Scope {
     readonly property var streams: Pipewire.nodes.values.filter(n => n.audio && n.isStream && !n.properties?.["node.link-group"] && !AudioService.isOwnStream(n))
     readonly property string defaultSink: AudioService.sink?.name ?? ""
 
-    // Running apps, oldest first (PipeWire serials only grow, so new apps land
-    // at the bottom), then split apps that are not running, so they can be forgotten.
+    // One entry per stream (a browser tab is a stream of its own), oldest
+    // first (PipeWire serials only grow, so new streams land at the bottom).
+    // A split app is one entry: all its streams share its bus. Split apps that
+    // are not running stay listed, so they can be forgotten.
     readonly property var apps: {
         const groups = {};
         for (const n of streams) {
@@ -57,7 +70,7 @@ Scope {
         }
         for (const key of Object.keys(splits))
             groups[key] = groups[key] ?? [];
-        return Object.keys(groups).map(key => describe(key, groups[key])).sort((a, b) => (a.since - b.since) || 0);
+        return Object.keys(groups).reduce((all, key) => all.concat(splits[key] ? [describe(key, groups[key])] : groups[key].map(n => describe(key, [n]))), []).sort((a, b) => (a.since - b.since) || 0);
     }
 
     // Loopbacks run for every saved split, so new streams find their bus at once.
@@ -69,6 +82,7 @@ Scope {
                 "media.class": "Audio/Sink",
                 "node.name": bus,
                 "node.description": "Mixer bus: " + appName(key),
+                "dankmixer.app": key,
                 "priority.session": 0,
                 "priority.driver": 0
             }, {
@@ -115,9 +129,34 @@ Scope {
         return props["application.process.binary"] || props["application.name"] || "";
     }
 
+    // Web Popups runs every web app in the same browser engine, so its apps
+    // are told apart by their application.id ("webpopups.<variant id>").
     function appKey(node) {
         const p = node.properties ?? {};
-        return (node.isSink ? "out:" : "in:") + (appSource(p) || node.name);
+        const id = p["application.id"] ?? "";
+        return (node.isSink ? "out:" : "in:") + (id.startsWith("webpopups.") ? id : (appSource(p) || node.name));
+    }
+
+    // Web Popups variant behind an app key, or null.
+    function webApp(key) {
+        const id = appName(key);
+        if (!id.startsWith("webpopups."))
+            return null;
+        const variants = SettingsData.getPluginSetting("webPopups", "variants", []) ?? [];
+        return variants.find(v => v.id === id.slice(10)) ?? null;
+    }
+
+    // Web Popups keeps its own output per web app; it is told every choice made
+    // here, so both plugins agree and neither moves the stream back. "" lets go.
+    function tellWebPopups(key, sink) {
+        const dir = PluginService.availablePlugins["webPopups"]?.pluginDirectory;
+        if (!dir || !webApp(key))
+            return;
+        Quickshell.execDetached(["python3", dir + "/helper/webpopups.py", "send", JSON.stringify({
+                "cmd": "output",
+                "id": appName(key).slice(10),
+                "output": sink
+            })]);
     }
 
     function appName(key) {
@@ -166,6 +205,13 @@ Scope {
     }
 
     function label(key, props) {
+        const web = webApp(key);
+        if (web)
+            return {
+                "name": web.name ?? "",
+                "icon": "",
+                "iconName": web.icon ?? ""
+            };
         if (!labels[key] && props) {
             const entry = DesktopEntries.heuristicLookup(appSource(props));
             labels[key] = {
@@ -185,21 +231,32 @@ Scope {
         const text = label(key, first?.properties);
         return {
             "key": key,
+            // Unique per entry: the app for a split app, else the stream.
+            "id": taps ? key : key + "#" + (first?.id ?? ""),
             "nodes": nodes,
             "running": !!first,
             "playback": first ? first.isSink : key.startsWith("out:"),
             "split": !!taps,
             "since": first ? Math.min(...nodes.map(n => Number(n.properties?.["object.serial"] ?? n.id))) : Infinity,
             "name": text.name || first?.name || appName(key),
+            // What is playing (a video or song title), from the newest stream.
+            "title": nodes.map(n => ({
+                        "serial": Number(n.properties?.["object.serial"] ?? n.id),
+                        "title": n.properties?.["media.name"] ?? ""
+                    })).filter(n => n.title).sort((a, b) => b.serial - a.serial)[0]?.title ?? "",
             "icon": text.icon,
+            "iconName": text.iconName ?? "",
             "outputs": taps ? taps.map(tap => ({
                         "id": tap.id,
                         "device": tap.sink,
+                        "label": tap.label ?? "",
                         "node": tapNode(key, tap.id)
                     })) : [
                 {
                     "id": 0,
-                    "device": linkedDevice(first),
+                    // Where the stream plays; the chosen device until it is linked.
+                    "device": (first ? linkedDevice(first) : "") || (chosen[key]?.sink ?? ""),
+                    "label": chosen[key]?.label ?? "",
                     "node": first
                 }
             ]
@@ -210,6 +267,65 @@ Scope {
     function route(stream, name) {
         Proc.runCommand(prefix + ".route." + stream.id, ["pw-metadata", "-n", "default", "--", String(stream.id), "target.object", name || "-1", "Spa:String"], null, 0, undefined, root);
     }
+
+    function makeTap(id, sink) {
+        return {
+            "id": id,
+            "sink": sink,
+            "label": node(sink)?.description ?? ""
+        };
+    }
+
+    // Some devices change name when they reconnect (AirPlay names carry the
+    // network address). A missing device is matched again by its description
+    // when exactly one connected device has it; taps saved before labels
+    // existed get one from their connected device.
+    // The device to use for a saved { sink, label }, or "" to keep it as is.
+    function renamed(t) {
+        if (!t.sink || present(t.sink))
+            return t.sink && !t.label ? t.sink : "";
+        const same = t.label ? sinks.filter(n => n.description === t.label) : [];
+        return same.length === 1 ? same[0].name : "";
+    }
+
+    function findDevices() {
+        if (!loaded)
+            return;
+        let changed = false;
+        const next = {};
+        for (const key in splits)
+            next[key] = splits[key].map(t => {
+                const sink = renamed(t);
+                if (!sink)
+                    return t;
+                changed = true;
+                return makeTap(t.id, sink);
+            });
+        if (changed)
+            setSplits(next);
+        for (const key in chosen) {
+            const sink = renamed(chosen[key]);
+            if (sink)
+                choose(key, sink);
+        }
+    }
+
+    function choose(key, sink) {
+        if (webApp(key))
+            return;
+        const next = Object.assign({}, chosen);
+        if (sink)
+            next[key] = {
+                "sink": sink,
+                "label": node(sink)?.description ?? ""
+            };
+        else
+            delete next[key];
+        chosen = next;
+        PluginService.savePluginData(pluginId, "chosen", next);
+    }
+
+    onSinksChanged: Qt.callLater(findDevices)
 
     function setSplits(next) {
         splits = next;
@@ -310,6 +426,14 @@ Scope {
             }
             onDeclaredChanged: declare()
             Component.onCompleted: declare()
+
+            readonly property bool inBus: !!bus && root.streams.filter(n => root.appKey(n) === modelData).every(n => root.linkedDevice(n) === bus.name)
+            onInBusChanged: if (inBus && root.handOff[modelData]) {
+                const next = Object.assign({}, root.handOff);
+                delete next[modelData];
+                root.handOff = next;
+                root.tellWebPopups(modelData, "");
+            }
         }
     }
 
@@ -336,15 +460,14 @@ Scope {
             return;
         const taps = splits[app.key];
         if (!taps) {
+            choose(app.key, device);
+            tellWebPopups(app.key, device);
             app.nodes.forEach(n => route(n, device));
             return;
         }
         stayOnBus(app.key);
         setSplits(Object.assign({}, splits, {
-            [app.key]: taps.map(tap => tap.id === id ? {
-                    "id": id,
-                    "sink": device
-                } : tap)
+            [app.key]: taps.map(t => t.id === id ? makeTap(id, device) : t)
         }));
         const tap = tapNode(app.key, id);
         if (tap)
@@ -357,22 +480,20 @@ Scope {
         if (!loaded)
             return;
         const current = app.outputs[0].device;
-        const taps = splits[app.key] ?? [
-            {
-                "id": 0,
-                "sink": current === defaultSink ? "" : current
-            }
-        ];
+        const taps = splits[app.key] ?? [makeTap(0, current === defaultSink ? "" : current)];
         const used = taps.map(tap => deviceName(tap.sink));
         const free = sinks.find(n => !used.includes(n.name));
         if (!free)
             return;
+        if (!splits[app.key])
+            choose(app.key, "");
+        if (!splits[app.key] && webApp(app.key))
+            handOff = Object.assign({}, handOff, {
+                [app.key]: true
+            });
         stayOnBus(app.key);
         setSplits(Object.assign({}, splits, {
-            [app.key]: taps.concat({
-                "id": Math.max(...taps.map(tap => tap.id)) + 1,
-                "sink": free.name
-            })
+            [app.key]: taps.concat(makeTap(Math.max(...taps.map(t => t.id)) + 1, free.name))
         }));
     }
 
@@ -408,13 +529,37 @@ Scope {
             return;
         }
         const gain = tapNode(key, tap.id)?.audio?.volume ?? 1;
+        if (tap.sink)
+            choose(key, tap.sink);
         streams.filter(n => appKey(n) === key).forEach(n => {
             n.audio.volume *= gain;
             route(n, tap.sink);
         });
+        leave(key, true);
+    }
+
+    function leave(key, handBack) {
         leaving = Object.assign({}, leaving, {
-            [key]: Date.now() + 3000
+            [key]: {
+                "until": Date.now() + 3000,
+                "handBack": handBack
+            }
         });
+    }
+
+    // Another plugin takes the app over (Web Popups when the user picks an
+    // output there): its streams are left where that plugin moves them, and
+    // the bus closes once they are off it.
+    IpcHandler {
+        target: "dankMixer"
+
+        function release(app: string): string {
+            const key = /^(out|in):/.test(app) ? app : "out:" + app;
+            if (!root.splits[key])
+                return "none";
+            root.leave(key, false);
+            return "released";
+        }
     }
 
     function stayOnBus(key) {
@@ -443,6 +588,8 @@ Scope {
         for (const key of keys) {
             if (!(key in still))
                 continue;
+            if (still[key].handBack)
+                tellWebPopups(key, splits[key][0]?.sink ?? "");
             delete still[key];
             delete next[key];
             changed = true;
@@ -458,7 +605,7 @@ Scope {
         running: Object.keys(root.leaving).length > 0
         interval: 500
         repeat: true
-        onTriggered: root.closeBuses(Object.keys(root.leaving).filter(key => root.leaving[key] < Date.now()))
+        onTriggered: root.closeBuses(Object.keys(root.leaving).filter(key => root.leaving[key].until < Date.now()))
     }
 
     PwObjectTracker {
@@ -466,6 +613,8 @@ Scope {
     }
 
     // Keeps every stream of a split app on its bus, including streams opened later.
+    // A new stream of an app with a chosen device is sent there once; after
+    // that it is left alone, so other tools can still move it.
     Instantiator {
         model: ScriptModel {
             values: root.streams.filter(n => n.isSink)
@@ -482,7 +631,13 @@ Scope {
                     root.route(modelData, bus);
             }
             onMisroutedChanged: fix()
-            Component.onCompleted: fix()
+            Component.onCompleted: {
+                fix();
+                const key = root.appKey(modelData);
+                const sink = root.chosen[key]?.sink ?? "";
+                if (root.loaded && !root.splits[key] && sink && root.present(sink))
+                    root.route(modelData, sink);
+            }
         }
     }
 
@@ -513,8 +668,10 @@ Scope {
         collapsed = PluginService.loadPluginData(pluginId, "collapsed", {});
         expanded = PluginService.loadPluginData(pluginId, "expanded", false);
         offsets = PluginService.loadPluginData(pluginId, "offsets", {});
+        chosen = PluginService.loadPluginData(pluginId, "chosen", {});
         readUnits(() => readLatencies(() => {
                 loaded = true;
+                findDevices();
                 // Left half-way by a restart while moving off a bus.
                 Object.keys(splits).filter(key => splits[key].length < 2).forEach(leaveBus);
             }));
