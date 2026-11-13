@@ -417,13 +417,16 @@ PluginComponent {
                         DDropdown {
                             compactMode: true
                             dropdownWidth: parent.width - (button.visible ? button.width + Theme.spacingS : 0)
-                            options: ["System default"].concat(card.devices.map(n => AudioService.displayName(n)), output.missing ? [(output.modelData.label || output.modelData.device) + " (not connected)"] : [])
-                            optionValues: [""].concat(card.devices.map(n => n.name), output.missing ? [output.modelData.device] : [])
-                            currentValue: output.modelData.device
+                            // DDropdown shows nothing for an empty value, so the
+                            // default device ("" in the daemon) has its own key here.
+                            readonly property string defaultKey: "@default"
+                            options: ["System default" + (AudioService.sink ? " (" + AudioService.displayName(AudioService.sink) + ")" : "")].concat(card.devices.map(n => AudioService.displayName(n)), output.missing ? [(output.modelData.label || output.modelData.device) + " (not connected)"] : [])
+                            optionValues: [defaultKey].concat(card.devices.map(n => n.name), output.missing ? [output.modelData.device] : [])
+                            currentValue: output.modelData.device || defaultKey
                             // Picking an entry replaces the binding; restore it to follow the real device.
                             onValueChanged: value => {
-                                root.mixer?.setOutput(card.app, output.modelData.id, value);
-                                currentValue = Qt.binding(() => output.modelData.device);
+                                root.mixer?.setOutput(card.app, output.modelData.id, value === defaultKey ? "" : value);
+                                currentValue = Qt.binding(() => output.modelData.device || defaultKey);
                             }
                         }
                         DIconButton {

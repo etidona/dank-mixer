@@ -212,6 +212,13 @@ version tracked one app at a time: removing outputs from two apps within three
 seconds closed the second app's bus with the first app's timer, before its
 streams had moved. Adding an output to a leaving app cancels the leave.
 
+When the bus closes, the split is removed **before** the leaving mark. In the
+other order, for one update the app is split and not leaving: the watcher saw
+its streams, already on their device, as misrouted and sent them back to the
+bus that was closing. WirePlumber then found the bus gone and played them on
+the default device. This showed up as about a second on the speakers when an
+app split between AirPlay and another device went back to AirPlay alone.
+
 If the shell restarts in the middle, the saved split has a single output; at
 startup the daemon finds it and finishes the move.
 

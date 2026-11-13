@@ -535,14 +535,16 @@ Scope {
             n.audio.volume *= gain;
             route(n, tap.sink);
         });
-        leave(key, true);
+        leave(key, true, tap.sink);
     }
 
-    function leave(key, handBack) {
+    // `sink` is the device the app ends up on, handed back to Web Popups.
+    function leave(key, handBack, sink) {
         leaving = Object.assign({}, leaving, {
             [key]: {
                 "until": Date.now() + 3000,
-                "handBack": handBack
+                "handBack": handBack,
+                "sink": sink ?? ""
             }
         });
     }
@@ -589,15 +591,18 @@ Scope {
             if (!(key in still))
                 continue;
             if (still[key].handBack)
-                tellWebPopups(key, splits[key][0]?.sink ?? "");
+                tellWebPopups(key, still[key].sink);
             delete still[key];
             delete next[key];
             changed = true;
         }
         if (!changed)
             return;
-        leaving = still;
+        // Splits first: for a moment the app would otherwise be split and
+        // not leaving, and its streams, already on their device, would be
+        // sent back to the bus that is about to close.
         setSplits(next);
+        leaving = still;
     }
 
     // Fallback for streams that never report a link.
@@ -673,7 +678,7 @@ Scope {
                 loaded = true;
                 findDevices();
                 // Left half-way by a restart while moving off a bus.
-                Object.keys(splits).filter(key => splits[key].length < 2).forEach(leaveBus);
+                Object.keys(splits).filter(key => splits[key].length < 2).forEach(key => leaveBus(key));
             }));
     }
 
