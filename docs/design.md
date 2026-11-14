@@ -379,7 +379,10 @@ its saved variants.
   widget restores it, so the menu keeps following the real device (for example
   when WirePlumber moves a stream after a device is unplugged).
 - **Output devices card:** the radio button sets the system default output;
-  each device has its volume and its sync delay.
+  each device has its volume and its sync delay. The sync delay is a small
+  folded button showing its value; clicked, it shows its -/+ controls right
+  next to it. Placed at the right edge of the row, the -/+ buttons read as
+  volume controls.
 
 ## 13. Saved data
 

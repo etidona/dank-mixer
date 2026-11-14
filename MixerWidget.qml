@@ -201,36 +201,82 @@ PluginComponent {
 
     // Fine sync: tells how late a device really sounds, so the other outputs of a
     // split app wait for it. Saved per device, used by every app.
+    // Folded by default: a small "Sync delay" button with the current value.
+    // Clicked, it shows the -/+ controls right next to it, so they cannot be
+    // taken for volume controls.
     component SyncRow: Item {
         id: sync
 
         required property string device
+        readonly property int ms: root.mixer?.offset(sync.device) ?? 0
+        property bool open: false
 
-        height: buttons.implicitHeight
+        height: Math.max(toggle.height, controls.implicitHeight)
 
-        StyledText {
-            anchors.verticalCenter: parent.verticalCenter
-            text: {
-                const ms = root.mixer?.offset(sync.device) ?? 0;
-                return "Sync delay: " + (ms > 0 ? "+" : "") + ms + " ms";
-            }
-            font.pixelSize: Theme.fontSizeSmall
-            color: Theme.surfaceVariantText
-        }
         Row {
-            id: buttons
-            anchors.right: parent.right
-            DIconButton {
-                widthMode: "narrow"
-                iconName: "remove"
-                tooltipText: "This device sounds earlier: -5 ms"
-                onClicked: root.mixer?.shiftOffset(sync.device, -5)
+            spacing: Theme.spacingXS
+            anchors.verticalCenter: parent.verticalCenter
+
+            Rectangle {
+                id: toggle
+                anchors.verticalCenter: parent.verticalCenter
+                width: label.implicitWidth + Theme.spacingS * 2
+                height: label.implicitHeight + Theme.spacingXS * 2
+                radius: height / 2
+                color: area.containsMouse || sync.open ? Theme.surfaceContainerHighest : "transparent"
+                border.width: 1
+                border.color: Theme.outlineVariant ?? Theme.surfaceVariantText
+
+                Row {
+                    id: label
+                    anchors.centerIn: parent
+                    spacing: Theme.spacingXS
+                    DIcon {
+                        anchors.verticalCenter: parent.verticalCenter
+                        name: sync.open ? "expand_less" : "timer"
+                        size: Theme.fontSizeSmall + 2
+                        color: Theme.surfaceVariantText
+                    }
+                    StyledText {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Sync delay" + (sync.open ? "" : ": " + (sync.ms > 0 ? "+" : "") + sync.ms + " ms")
+                        font.pixelSize: Theme.fontSizeSmall
+                        color: sync.ms !== 0 ? Theme.surfaceText : Theme.surfaceVariantText
+                    }
+                }
+                MouseArea {
+                    id: area
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: sync.open = !sync.open
+                }
             }
-            DIconButton {
-                widthMode: "narrow"
-                iconName: "add"
-                tooltipText: "This device sounds later: +5 ms"
-                onClicked: root.mixer?.shiftOffset(sync.device, 5)
+
+            Row {
+                id: controls
+                visible: sync.open
+                anchors.verticalCenter: parent.verticalCenter
+                DIconButton {
+                    widthMode: "narrow"
+                    iconName: "remove"
+                    tooltipText: "This device sounds earlier: -5 ms"
+                    onClicked: root.mixer?.shiftOffset(sync.device, -5)
+                }
+                StyledText {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Theme.fontSizeSmall * 4
+                    horizontalAlignment: Text.AlignHCenter
+                    text: (sync.ms > 0 ? "+" : "") + sync.ms + " ms"
+                    font.pixelSize: Theme.fontSizeSmall
+                    color: Theme.surfaceText
+                }
+                DIconButton {
+                    widthMode: "narrow"
+                    iconName: "add"
+                    tooltipText: "This device sounds later: +5 ms"
+                    onClicked: root.mixer?.shiftOffset(sync.device, 5)
+                }
             }
         }
     }
