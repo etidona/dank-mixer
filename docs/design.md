@@ -97,8 +97,21 @@ every video or tab, and a new stream goes to the default device: without this,
 each new YouTube video played on the speakers while the menu still showed the
 AirPlay receiver, which looked like the receiver disconnecting. Picking a device on a card moves only
 that stream and saves the device as the app's choice. Each new stream of an app
-with a chosen device is sent there once, when it appears; after that it is left
-alone, so other tools can still move it. A card's menu shows the device its
+with a chosen device is sent there once, when it is ready; after that it is left
+alone, so other tools can still move it. A new stream has no properties until
+it is bound, and without them its app key is wrong (`out:Zen`, from the node
+name, instead of `out:zen`, from the binary), so the device is chosen when
+`PwNode.ready` turns true, not when the delegate is created. Zen opens a new
+stream when YouTube changes resolution, and it went to the speakers before this.
+Streams that were already there when the plugin loaded are left where they are.
+
+Some apps also drop their stream's target now and then: Zen, through
+pipewire-pulse, removes the `target.object` key of a stream it keeps playing,
+and WirePlumber then sends the stream to the default device. Tools that move a
+stream write a new target and never remove one, so the daemon follows the
+`default` metadata (`pw-metadata -m`) and puts a removed target back, for the
+same stream only (ids are reused, so the stream's serial is checked). Split
+apps, Web Popups apps and streams set to the default device are left out. A card's menu shows the device its
 stream is linked to, else the chosen device while the stream is not linked yet. Web Popups apps are not saved here: Web Popups keeps their
 output (see section 11).
 
@@ -427,6 +440,11 @@ Saved with `PluginService.savePluginData` under the plugin id:
 - `pw-link -t` needs `-i` or `-o`; numbers depend on the locale.
 - `pkill -f` patterns must be anchored: an unanchored pattern once matched the
   shell running the test.
+- `pw-metadata -m` prints `update: id:N key:'k' value:'v' type:'t'`, then
+  `remove: id:N key:'k'` or `remove: id:N all keys` (when the object goes);
+  writes on an id that doesn't exist are ignored.
+- A `PwNode` has no properties until `ready`; code that reads them when the
+  node appears must wait for it.
 - `dms ipc call widget hide <id>` hides the widget from the bar (restore with
   `widget reset`); `widget toggle` opens and closes the popout.
 

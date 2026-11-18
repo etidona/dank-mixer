@@ -15,7 +15,8 @@ with any app playing on several outputs at once.
 - **One card per stream** playing or recording audio, with its volume: two
   browser tabs get two cards.
 - **Choose the output** of each stream, or let it follow the system default.
-  New streams of the app go to the last device chosen.
+  New streams of the app go to the last device chosen, also when a video
+  player opens a new stream (for example on a resolution change).
 - **Several outputs at once:** send an app to speakers and headphones together,
   each output with its own volume, relative to the app's volume.
 - **Latency sync** across outputs: faster outputs wait for the slowest one, and

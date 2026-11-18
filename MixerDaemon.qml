@@ -32,6 +32,8 @@ Scope {
     property bool expanded: false
     // Saved data, running units and latencies are known; actions wait for it.
     property bool loaded: false
+    // When it became loaded (ms); streams older than this are not new.
+    property real loadedAt: 0
     // App key -> { until (ms), handBack } for apps whose streams are moving off
     // their bus; handBack tells Web Popups the device they end up on.
     property var leaving: ({})
@@ -266,6 +268,57 @@ Scope {
     // Sends a stream to a device by name; "" (WirePlumber's -1) follows the default device.
     function route(stream, name) {
         Proc.runCommand(prefix + ".route." + stream.id, ["pw-metadata", "-n", "default", "--", String(stream.id), "target.object", name || "-1", "Spa:String"], null, 0, undefined, root);
+    }
+
+    // Stream id -> { target, serial }: the stream's target.object as last seen in
+    // the default metadata, and the stream it was set for (ids are reused).
+    property var targets: ({})
+
+    // Some apps drop their stream's target now and then: Zen, through
+    // pipewire-pulse, does when YouTube restarts its player for a new
+    // resolution. WirePlumber then sends the stream to the default device.
+    // Tools that move a stream write a new target and never remove one, so a
+    // removed target is put back. Split apps are kept on their bus elsewhere,
+    // and Web Popups looks after its own apps.
+    function metadataLine(line) {
+        const m = /^(update|remove): id:(\d+) (?:all keys|key:'([^']*)'(?: value:'(.*)' type:'[^']*')?)$/.exec(line);
+        if (!m || (m[3] !== undefined && m[3] !== "target.object"))
+            return;
+        const id = Number(m[2]);
+        const stream = streams.find(n => n.id === id && n.isSink) ?? null;
+        const serial = stream?.properties?.["object.serial"] ?? "";
+        if (m[1] === "update") {
+            targets[id] = {
+                "target": m[4],
+                "serial": serial
+            };
+            return;
+        }
+        const was = targets[id];
+        delete targets[id];
+        if (!stream || !was || (was.serial && was.serial !== serial) || was.target === "-1")
+            return;
+        const key = appKey(stream);
+        if (splits[key] || key in leaving || webApp(key))
+            return;
+        console.info("dankMixer: stream", id, "lost its target, sent back to", was.target);
+        route(stream, was.target);
+    }
+
+    Process {
+        id: metadataWatch
+        command: ["pw-metadata", "-n", "default", "-m"]
+        stdout: SplitParser {
+            onRead: line => root.metadataLine(line)
+        }
+        // pw-metadata quits when PipeWire restarts.
+        onExited: restartWatch.start()
+    }
+
+    Timer {
+        id: restartWatch
+        interval: 2000
+        onTriggered: metadataWatch.running = true
     }
 
     function makeTap(id, sink) {
@@ -636,12 +689,25 @@ Scope {
                     root.route(modelData, bus);
             }
             onMisroutedChanged: fix()
-            Component.onCompleted: {
-                fix();
+            // A new stream has no properties until it is bound, and without
+            // them its app key is wrong. Streams already there when the plugin
+            // loads are left where they are.
+            property bool placed: false
+            readonly property real born: Date.now()
+            readonly property bool ready: modelData.ready
+            function place() {
+                if (placed || !ready || !root.loaded || born < root.loadedAt)
+                    return;
+                placed = true;
                 const key = root.appKey(modelData);
                 const sink = root.chosen[key]?.sink ?? "";
-                if (root.loaded && !root.splits[key] && sink && root.present(sink))
+                if (!root.splits[key] && sink && root.present(sink))
                     root.route(modelData, sink);
+            }
+            onReadyChanged: place()
+            Component.onCompleted: {
+                fix();
+                place();
             }
         }
     }
@@ -675,7 +741,9 @@ Scope {
         offsets = PluginService.loadPluginData(pluginId, "offsets", {});
         chosen = PluginService.loadPluginData(pluginId, "chosen", {});
         readUnits(() => readLatencies(() => {
+                loadedAt = Date.now();
                 loaded = true;
+                metadataWatch.running = true;
                 findDevices();
                 // Left half-way by a restart while moving off a bus.
                 Object.keys(splits).filter(key => splits[key].length < 2).forEach(key => leaveBus(key));
