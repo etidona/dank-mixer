@@ -39,10 +39,13 @@ Scope {
     property var leaving: ({})
     // Device name -> latency in ns as PipeWire reports it.
     property var latencies: ({})
-    // App key -> { sink, label } for apps sent to one chosen device (saved).
-    // Browsers open a new stream for every video; new streams go there too.
-    // Web Popups apps are not kept here: Web Popups remembers their output.
-    property var chosen: ({})
+    // App key -> { target, at }: where the app's stream that closed last was
+    // sent, and when it closed (ms). Browsers close a tab's stream and open a
+    // new one for a new video or resolution; a stream opened soon after takes
+    // the closed one's place. A new tab opens without one closing and follows
+    // the default device.
+    property var closed: ({})
+    readonly property int replaceWindow: 5000
     // Device name -> extra latency in ms set by the user, for delay PipeWire doesn't know about (saved).
     property var offsets: ({})
     // Systemd units of the loopbacks running now.
@@ -256,9 +259,9 @@ Scope {
                     })) : [
                 {
                     "id": 0,
-                    // Where the stream plays; the chosen device until it is linked.
-                    "device": (first ? linkedDevice(first) : "") || (chosen[key]?.sink ?? ""),
-                    "label": chosen[key]?.label ?? "",
+                    // Where the stream plays, "" while it is not linked.
+                    "device": first ? linkedDevice(first) : "",
+                    "label": first ? (node(linkedDevice(first))?.description ?? "") : "",
                     "node": first
                 }
             ]
@@ -271,22 +274,33 @@ Scope {
     }
 
     // Stream id -> { target, serial }: the stream's target.object as last seen in
-    // the default metadata, and the stream it was set for (ids are reused).
+    // the default metadata, and the stream it belongs to. PipeWire reuses ids
+    // at once, so an entry counts only for the stream with that serial; an
+    // entry written before its stream was ready has no serial until the
+    // stream's delegate claims it.
+    // `targets` and `closed` are changed in place on purpose: nothing binds to
+    // them, and they change on every metadata line.
     property var targets: ({})
 
+    function readySerial(node) {
+        return node?.ready ? String(node.properties?.["object.serial"] ?? "") : "";
+    }
+
     // Some apps drop their stream's target now and then: Zen, through
-    // pipewire-pulse, does when YouTube restarts its player for a new
-    // resolution. WirePlumber then sends the stream to the default device.
-    // Tools that move a stream write a new target and never remove one, so a
-    // removed target is put back. Split apps are kept on their bus elsewhere,
-    // and Web Popups looks after its own apps.
+    // pipewire-pulse, removes the target.object key of a stream it keeps
+    // playing, and WirePlumber then sends the stream to the default device.
+    // Tools that move a stream write a new target and never remove the key,
+    // so such a removal is undone. A stream that goes away loses all its keys
+    // at once ("all keys"); that is never undone, and the entry stays for the
+    // closing delegate, which reads it. Split apps are kept on their bus
+    // elsewhere, and Web Popups looks after its own apps.
     function metadataLine(line) {
         const m = /^(update|remove): id:(\d+) (?:all keys|key:'([^']*)'(?: value:'(.*)' type:'[^']*')?)$/.exec(line);
         if (!m || (m[3] !== undefined && m[3] !== "target.object"))
             return;
         const id = Number(m[2]);
         const stream = streams.find(n => n.id === id && n.isSink) ?? null;
-        const serial = stream?.properties?.["object.serial"] ?? "";
+        const serial = readySerial(stream);
         if (m[1] === "update") {
             targets[id] = {
                 "target": m[4],
@@ -295,14 +309,58 @@ Scope {
             return;
         }
         const was = targets[id];
-        delete targets[id];
-        if (!stream || !was || (was.serial && was.serial !== serial) || was.target === "-1")
+        if (m[3] === undefined) {
+            // Its delegate has already read the entry, or no stream owns it.
+            if (!stream)
+                delete targets[id];
+            return;
+        }
+        if (!was || !serial || was.serial !== serial)
             return;
         const key = appKey(stream);
-        if (splits[key] || key in leaving || webApp(key))
+        if (was.target === "-1" || splits[key] || key in leaving || webApp(key)) {
+            // Left to WirePlumber: the stream now follows the default device.
+            was.target = "-1";
             return;
+        }
         console.info("dankMixer: stream", id, "lost its target, sent back to", was.target);
         route(stream, was.target);
+    }
+
+    // A delegate claims the entry written for its stream before it was ready,
+    // and drops one left by an older stream with the same id.
+    function claimTarget(id, serial) {
+        const was = targets[id];
+        if (!was)
+            return;
+        if (!was.serial)
+            was.serial = serial;
+        else if (was.serial !== serial)
+            delete targets[id];
+    }
+
+    // Remembers where a closing stream was sent, for the stream that may
+    // replace it. One that followed the default device leaves nothing.
+    function streamClosed(key, id, serial) {
+        if (!key)
+            return;
+        const was = targets[id];
+        const mine = !!was && !!serial && was.serial === serial;
+        if (mine)
+            delete targets[id];
+        if (mine && was.target !== "-1")
+            closed[key] = {
+                "target": was.target,
+                "at": Date.now()
+            };
+        else
+            delete closed[key];
+    }
+
+    // A target is a node name, or an object serial when a PulseAudio tool
+    // moved the stream.
+    function targetPresent(target) {
+        return /^\d+$/.test(target) ? Pipewire.nodes.values.some(n => n.properties?.["object.serial"] === target) : present(target);
     }
 
     Process {
@@ -311,8 +369,12 @@ Scope {
         stdout: SplitParser {
             onRead: line => root.metadataLine(line)
         }
-        // pw-metadata quits when PipeWire restarts.
-        onExited: restartWatch.start()
+        // pw-metadata quits when PipeWire restarts, and the metadata starts
+        // empty again.
+        onExited: {
+            root.targets = {};
+            restartWatch.start();
+        }
     }
 
     Timer {
@@ -333,7 +395,7 @@ Scope {
     // network address). A missing device is matched again by its description
     // when exactly one connected device has it; taps saved before labels
     // existed get one from their connected device.
-    // The device to use for a saved { sink, label }, or "" to keep it as is.
+    // The device to use for a saved tap, or "" to keep it as is.
     function renamed(t) {
         if (!t.sink || present(t.sink))
             return t.sink && !t.label ? t.sink : "";
@@ -356,26 +418,6 @@ Scope {
             });
         if (changed)
             setSplits(next);
-        for (const key in chosen) {
-            const sink = renamed(chosen[key]);
-            if (sink)
-                choose(key, sink);
-        }
-    }
-
-    function choose(key, sink) {
-        if (webApp(key))
-            return;
-        const next = Object.assign({}, chosen);
-        if (sink)
-            next[key] = {
-                "sink": sink,
-                "label": node(sink)?.description ?? ""
-            };
-        else
-            delete next[key];
-        chosen = next;
-        PluginService.savePluginData(pluginId, "chosen", next);
     }
 
     onSinksChanged: Qt.callLater(findDevices)
@@ -513,7 +555,6 @@ Scope {
             return;
         const taps = splits[app.key];
         if (!taps) {
-            choose(app.key, device);
             tellWebPopups(app.key, device);
             app.nodes.forEach(n => route(n, device));
             return;
@@ -538,8 +579,6 @@ Scope {
         const free = sinks.find(n => !used.includes(n.name));
         if (!free)
             return;
-        if (!splits[app.key])
-            choose(app.key, "");
         if (!splits[app.key] && webApp(app.key))
             handOff = Object.assign({}, handOff, {
                 [app.key]: true
@@ -582,8 +621,6 @@ Scope {
             return;
         }
         const gain = tapNode(key, tap.id)?.audio?.volume ?? 1;
-        if (tap.sink)
-            choose(key, tap.sink);
         streams.filter(n => appKey(n) === key).forEach(n => {
             n.audio.volume *= gain;
             route(n, tap.sink);
@@ -671,8 +708,8 @@ Scope {
     }
 
     // Keeps every stream of a split app on its bus, including streams opened later.
-    // A new stream of an app with a chosen device is sent there once; after
-    // that it is left alone, so other tools can still move it.
+    // A new stream that replaces one just closed is sent where that one was,
+    // once; after that it is left alone, so other tools can still move it.
     Instantiator {
         model: ScriptModel {
             values: root.streams.filter(n => n.isSink)
@@ -690,25 +727,38 @@ Scope {
             }
             onMisroutedChanged: fix()
             // A new stream has no properties until it is bound, and without
-            // them its app key is wrong. Streams already there when the plugin
-            // loads are left where they are.
+            // them its app key is wrong. Key, id and serial are recorded for
+            // every stream; streams already there when the plugin loads are
+            // left where they are.
             property bool placed: false
             readonly property real born: Date.now()
             readonly property bool ready: modelData.ready
+            // Kept for when the stream is gone.
+            property string key: ""
+            property int streamId: -1
+            property string serial: ""
             function place() {
-                if (placed || !ready || !root.loaded || born < root.loadedAt)
+                if (placed || !ready)
                     return;
                 placed = true;
-                const key = root.appKey(modelData);
-                const sink = root.chosen[key]?.sink ?? "";
-                if (!root.splits[key] && sink && root.present(sink))
-                    root.route(modelData, sink);
+                key = root.appKey(modelData);
+                streamId = modelData.id;
+                serial = root.readySerial(modelData);
+                root.claimTarget(streamId, serial);
+                if (!root.loaded || born < root.loadedAt)
+                    return;
+                const last = root.closed[key];
+                if (!last || Date.now() - last.at > root.replaceWindow || root.splits[key] || root.webApp(key) || !root.targetPresent(last.target))
+                    return;
+                delete root.closed[key];
+                root.route(modelData, last.target);
             }
             onReadyChanged: place()
             Component.onCompleted: {
                 fix();
                 place();
             }
+            Component.onDestruction: root.streamClosed(key, streamId, serial)
         }
     }
 
@@ -739,7 +789,9 @@ Scope {
         collapsed = PluginService.loadPluginData(pluginId, "collapsed", {});
         expanded = PluginService.loadPluginData(pluginId, "expanded", false);
         offsets = PluginService.loadPluginData(pluginId, "offsets", {});
-        chosen = PluginService.loadPluginData(pluginId, "chosen", {});
+        // Saved by versions that kept one device per app.
+        if (PluginService.loadPluginData(pluginId, "chosen", undefined) !== undefined)
+            PluginService.savePluginData(pluginId, "chosen", undefined);
         readUnits(() => readLatencies(() => {
                 loadedAt = Date.now();
                 loaded = true;

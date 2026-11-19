@@ -92,28 +92,59 @@ pw-metadata -n default -- <stream id> target.object <sink name> Spa:String
 again. **Deleting** the key does not move the stream back, which is why `-1` is
 used.
 
-The chosen device is saved per app (`chosen`). A browser opens a new stream for
-every video or tab, and a new stream goes to the default device: without this,
-each new YouTube video played on the speakers while the menu still showed the
-AirPlay receiver, which looked like the receiver disconnecting. Picking a device on a card moves only
-that stream and saves the device as the app's choice. Each new stream of an app
-with a chosen device is sent there once, when it is ready; after that it is left
-alone, so other tools can still move it. A new stream has no properties until
-it is bound, and without them its app key is wrong (`out:Zen`, from the node
-name, instead of `out:zen`, from the binary), so the device is chosen when
-`PwNode.ready` turns true, not when the delegate is created. Zen opens a new
-stream when YouTube changes resolution, and it went to the speakers before this.
-Streams that were already there when the plugin loaded are left where they are.
+Picking a device on a card moves only that stream; nothing is saved per app.
+A new stream follows the default device, with one exception. A browser closes a
+tab's stream and opens a new one for a new video or a new resolution, and
+PipeWire often gives it the same id; without help it went to the default
+device, which looked like the AirPlay receiver disconnecting. So a stream that
+closes leaves its target in `closed` (app key → `{ target, at }`), and a stream
+of the same app that becomes ready less than `replaceWindow` (5 s) later is sent
+there once; after that it is left alone, so other tools can still move it. A
+new tab opens without a stream closing, so it follows the default device. A
+stream that followed the default device leaves nothing behind. (An earlier
+version saved one device per app, `chosen`, and sent every new stream there,
+new tabs included; its saved data is removed at load.)
 
-Some apps also drop their stream's target now and then: Zen, through
-pipewire-pulse, removes the `target.object` key of a stream it keeps playing,
-and WirePlumber then sends the stream to the default device. Tools that move a
-stream write a new target and never remove one, so the daemon follows the
-`default` metadata (`pw-metadata -m`) and puts a removed target back, for the
-same stream only (ids are reused, so the stream's serial is checked). Split
-apps, Web Popups apps and streams set to the default device are left out. A card's menu shows the device its
-stream is linked to, else the chosen device while the stream is not linked yet. Web Popups apps are not saved here: Web Popups keeps their
-output (see section 11).
+Limits of this rule, accepted: a tab opened within 5 s of another tab of the
+same app closing takes that tab's device; if a stream that followed the default
+closes right after one on a device, the entry is gone; the entry is used once,
+so only the first of two new streams takes it; a target that names a device no
+longer present is dropped.
+
+A new stream has no properties until it is bound, and without them its app key
+is wrong (`out:Zen`, from the node name, instead of `out:zen`, from the binary).
+So each delegate records the stream's key, id and serial when `PwNode.ready`
+turns true, not when it is created, and only streams born after the plugin
+loaded are moved. Streams already there when the plugin loads are left where
+they are.
+
+The daemon follows the `default` metadata (`pw-metadata -m`) and keeps each
+stream's target in `targets` (stream id → `{ target, serial }`). Ids are reused
+at once, so an entry counts only for the stream with that serial; an entry
+written before its stream was ready has no serial until the stream's delegate
+claims it, and one left by an older stream with the same id is dropped then.
+Two kinds of removal come through:
+
+- `remove: id:N key:'target.object'` on a live stream: some apps drop their
+  stream's target now and then. Zen, through pipewire-pulse, does it to a
+  stream it keeps playing, and WirePlumber then sends it to the default device.
+  Tools that move a stream write a new target and never remove the key, so the
+  target is put back. Split apps, apps leaving their bus, Web Popups apps and
+  streams set to the default device are left out; for them the entry becomes
+  `-1`, as WirePlumber now has the stream on the default device.
+- `remove: id:N all keys`: the stream is going away. This is never undone, as
+  the id may already belong to a new stream. The entry stays while the stream
+  is still listed, so the closing delegate can read it for `closed`; otherwise
+  it is deleted.
+
+`targets` is emptied when `pw-metadata` quits (PipeWire restarted). After a
+PipeWire restart, streams that reconnect within 5 s go back where they were.
+A target can be an object serial instead of a node name (pipewire-pulse writes
+one when a PulseAudio tool moves a stream); both are checked before use.
+
+A card's menu shows the device its stream is linked to, or nothing while the
+stream is not linked yet. Web Popups apps are left to Web Popups, which keeps
+their output (see section 11).
 
 ## 4. Several outputs: bus and taps
 
@@ -404,7 +435,6 @@ Saved with `PluginService.savePluginData` under the plugin id:
 | Key | Content |
 |---|---|
 | `splits` | app key → list of `{ id, sink, label }`; `sink` "" means the default device, `label` is the device description |
-| `chosen` | app key → `{ sink, label }`, the device chosen for an app with one output |
 | `offsets` | device name → sync delay in ms |
 | `collapsed` | card key ("devices" or an app key) → folded |
 | `expanded` | expanded view on or off |
@@ -442,7 +472,9 @@ Saved with `PluginService.savePluginData` under the plugin id:
   shell running the test.
 - `pw-metadata -m` prints `update: id:N key:'k' value:'v' type:'t'`, then
   `remove: id:N key:'k'` or `remove: id:N all keys` (when the object goes);
-  writes on an id that doesn't exist are ignored.
+  writes on an id that doesn't exist are ignored. PipeWire reuses a freed id
+  at once, often for the next stream of the same app, and the `all keys`
+  removal and Quickshell's node removal come in no fixed order.
 - A `PwNode` has no properties until `ready`; code that reads them when the
   node appears must wait for it.
 - `dms ipc call widget hide <id>` hides the widget from the bar (restore with

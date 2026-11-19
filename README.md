@@ -15,8 +15,9 @@ with any app playing on several outputs at once.
 - **One card per stream** playing or recording audio, with its volume: two
   browser tabs get two cards.
 - **Choose the output** of each stream, or let it follow the system default.
-  New streams of the app go to the last device chosen, also when a video
-  player opens a new stream (for example on a resolution change).
+  New tabs follow the default device; when a video player replaces its stream
+  (a new video or a resolution change), the new stream stays on the device of
+  the old one.
 - **Several outputs at once:** send an app to speakers and headphones together,
   each output with its own volume, relative to the app's volume.
 - **Latency sync** across outputs: faster outputs wait for the slowest one, and
@@ -79,6 +80,8 @@ How and why it is built this way, in detail: [docs/design.md](docs/design.md).
   sync delay to fine-tune by ear.
 - An app on several outputs is a single card: all its streams (every browser
   tab) play through the same outputs.
+- A new tab opened within 5 seconds of another tab of the same app closing
+  takes the closed tab's device.
 - Routing to several outputs is for playback only; recording apps get a
   single input.
 
